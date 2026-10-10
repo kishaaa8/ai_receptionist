@@ -1,0 +1,72 @@
+{
+  "salon_name": "Glow & Style Salon",
+  "phone": "+91-9876543210",
+  "address": "123 Main Street, Bengaluru, Karnataka",
+
+  "opening_hours": {
+    "monday":    { "open": "09:00", "close": "20:00" },
+    "tuesday":   { "open": "09:00", "close": "20:00" },
+    "wednesday": { "open": "09:00", "close": "20:00" },
+    "thursday":  { "open": "09:00", "close": "20:00" },
+    "friday":    { "open": "09:00", "close": "21:00" },
+    "saturday":  { "open": "10:00", "close": "21:00" },
+    "sunday":    "closed"
+  },
+
+  "services": [
+    {
+      "name": "Haircut (Men)",
+      "price": 300,
+      "currency": "INR",
+      "duration_minutes": 30
+    },
+    {
+      "name": "Haircut (Women)",
+      "price": 500,
+      "currency": "INR",
+      "duration_minutes": 45
+    },
+    {
+      "name": "Hair Coloring",
+      "price": 1500,
+      "currency": "INR",
+      "duration_minutes": 90
+    },
+    {
+      "name": "Beard Trim",
+      "price": 150,
+      "currency": "INR",
+      "duration_minutes": 15
+    },
+    {
+      "name": "Facial",
+      "price": 800,
+      "currency": "INR",
+      "duration_minutes": 60
+    },
+    {
+      "name": "Manicure",
+      "price": 400,
+      "currency": "INR",
+      "duration_minutes": 30
+    },
+    {
+      "name": "Pedicure",
+      "price": 500,
+      "currency": "INR",
+      "duration_minutes": 40
+    },
+    {
+      "name": "Head Massage",
+      "price": 250,
+      "currency": "INR",
+      "duration_minutes": 20
+    },
+    {
+      "name": "Bridal Package",
+      "price": 8000,
+      "currency": "INR",
+      "duration_minutes": 180
+    }
+  ]
+}
