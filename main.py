@@ -6,7 +6,11 @@ import re
 from datetime import datetime
 from groq import Groq
 from dotenv import load_dotenv
-from tools import check_slots, book_appointment, send_confirmation
+from tools import (
+    check_slots, book_appointment, send_confirmation,
+    cancel_appointment, reschedule_appointment,
+    lookup_customer, remember_customer,
+)
 
 # ── Auto-email helpers (send_confirmation is NOT exposed to the LLM) ──
 EMAIL_RE = re.compile(r"[\w\.-]+@[\w\.-]+\.\w+")
@@ -95,6 +99,10 @@ def auto_send_email_for_booking(booking_args: dict, booking_result: dict, conver
             time=booking_args["time"],
         )
         _EMAIL_SENT_EVENT_IDS.add(event_id)
+        try:
+            remember_customer(booking_args.get("phone", ""), email=email)
+        except Exception:
+            pass
         conversation.append({
             "role": "system",
             "content": f"[System note: confirmation email auto-sent to {email}: {json.dumps(email_result)}. Tell the customer the booking is confirmed and the email was sent.]",
@@ -130,6 +138,10 @@ def try_send_pending_email(user_input: str, conversation: list[dict]):
             time=_LAST_BOOKING["time"],
         )
         _EMAIL_SENT_EVENT_IDS.add(_LAST_BOOKING["event_id"])
+        try:
+            remember_customer(_LAST_BOOKING.get("phone", ""), email=email)
+        except Exception:
+            pass
         conversation.append({
             "role": "system",
             "content": f"[System note: pending confirmation email auto-sent to {email}: {json.dumps(email_result)}. Confirm to the customer.]",
@@ -191,6 +203,17 @@ When a customer wants to book an appointment, follow these steps:
 7. After booking, confirm with a friendly summary. If the system note says
    the email was sent, mention it. If it says no email was found, ask for
    the customer's email address.
+
+### Cancelling / rescheduling
+When the customer wants to cancel or move a booking:
+1. Ask for their PHONE number (plus DATE, and TIME if they may have several bookings).
+2. Call cancel_appointment or reschedule_appointment.
+3. If it returns need_choice with matches, read the options out and ask which one.
+4. Confirm the result with a friendly summary.
+
+### Returning customers
+If the customer gives a phone number any time, you may call lookup_customer.
+Greet returning customers by name and reuse their saved name/email instead of asking again.
 
 ### Guidelines
 - Use Rs. or INR for prices.
@@ -266,12 +289,90 @@ TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_appointment",
+            "description": "Cancel a booking by deleting its calendar event. Ask for phone first (+ date/time if ambiguous).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "phone": {
+                        "type": "string",
+                        "description": "Customer's phone number (any format)"
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": "Booking date YYYY-MM-DD (to narrow down)"
+                    },
+                    "time": {
+                        "type": "string",
+                        "description": "Booking start time HH:MM (to narrow down further)"
+                    }
+                },
+                "required": ["phone"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reschedule_appointment",
+            "description": "Move a booking to a new date/time. Ask for phone, current date, and the new date/time.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "phone": {
+                        "type": "string",
+                        "description": "Customer's phone number (any format)"
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": "Current booking date YYYY-MM-DD"
+                    },
+                    "new_date": {
+                        "type": "string",
+                        "description": "New date YYYY-MM-DD"
+                    },
+                    "new_time": {
+                        "type": "string",
+                        "description": "New start time HH:MM"
+                    },
+                    "time": {
+                        "type": "string",
+                        "description": "Current start time HH:MM (to disambiguate multiple bookings)"
+                    }
+                },
+                "required": ["phone", "date", "new_date", "new_time"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "lookup_customer",
+            "description": "Look up a returning customer by phone. Returns saved name/email if known.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "phone": {
+                        "type": "string",
+                        "description": "Customer's phone number (any format)"
+                    }
+                },
+                "required": ["phone"]
+            }
+        }
+    },
 ]
 
 # ── Map tool names to actual functions ───────────────────────────────
 TOOL_FUNCTIONS = {
     "check_slots": check_slots,
     "book_appointment": book_appointment,
+    "cancel_appointment": cancel_appointment,
+    "reschedule_appointment": reschedule_appointment,
+    "lookup_customer": lookup_customer,
 }
 
 # ── Initialise Groq client ──────────────────────────────────────────
@@ -376,7 +477,7 @@ def process_tool_calls(response, conversation, max_tokens: int = 512):
         print(f"  [Tool] {func_name}({json.dumps(args, ensure_ascii=False)})")
 
         if func_name not in TOOL_FUNCTIONS:
-            tool_result = json.dumps({"error": f"Unknown tool '{func_name}'. Available: check_slots, book_appointment."}, ensure_ascii=False)
+            tool_result = json.dumps({"error": f"Unknown tool '{func_name}'. Available: check_slots, book_appointment, cancel_appointment, reschedule_appointment, lookup_customer."}, ensure_ascii=False)
             conversation.append({
                 "role": "tool",
                 "tool_call_id": tc_id,

@@ -81,5 +81,55 @@ def main():
     print(f"{'='*55}\n")
 
 
+def test_phase7():
+    """
+    Phase 7 net-zero cycle: book -> lookup -> reschedule -> cancel.
+    Leaves no calendar event behind (only bookings.log + customers.json lines).
+    """
+    from tools import (
+        cancel_appointment, reschedule_appointment, lookup_customer,
+        _find_customer_events,
+    )
+
+    print("=" * 55)
+    print("  Phase 7 -- Cancel / Reschedule / Customers Test")
+    print("=" * 55)
+
+    # Pick a weekday (skip Sunday, salon closed)
+    day = datetime.now() + timedelta(days=2)
+    while day.strftime("%A") == "Sunday":
+        day += timedelta(days=1)
+    date = day.strftime("%Y-%m-%d")
+    svc, phone = "Beard Trim", "+91-9000000007"
+
+    slots = check_slots(date=date, service=svc)
+    assert len(slots) >= 2, "need 2+ free slots to test reschedule"
+    t1, t2 = slots[0]["start"], slots[1]["start"]
+
+    booked = book_appointment(name="Phase7 Test", phone=phone, service=svc, date=date, time=t1)
+    print(f"\n[BOOK] {booked['start']} ({booked['event_id']})")
+
+    cust = lookup_customer(phone=phone)
+    assert cust.get("known") and cust.get("name") == "Phase7 Test", f"not remembered: {cust}"
+    print(f"  [OK] returning customer remembered: {cust}")
+
+    moved = reschedule_appointment(phone=phone, date=date, new_date=date, new_time=t2)
+    assert moved["status"] == "rescheduled", moved
+    print(f"  [OK] rescheduled {moved['old_start']} -> {moved['start']}")
+
+    cancelled = cancel_appointment(phone=phone, date=date)
+    assert cancelled["status"] == "cancelled", cancelled
+    print(f"  [OK] cancelled {cancelled['start']}")
+
+    leftovers = _find_customer_events(phone, date)
+    assert not leftovers, f"leftovers on calendar: {leftovers}"
+    print(f"\n{'='*55}")
+    print("  Phase 7 cycle passed, calendar clean.")
+    print(f"{'='*55}\n")
+
+
 if __name__ == "__main__":
-    main()
+    if "--phase7" in sys.argv:
+        test_phase7()
+    else:
+        main()

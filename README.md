@@ -1,6 +1,8 @@
 # AI Receptionist — Glow & Style Salon
 
-Friendly AI receptionist that answers salon questions, books appointments in Google Calendar, and sends email confirmations. Works over text chat, laptop voice, and real phone calls (Twilio).
+Friendly AI receptionist that answers salon questions, books appointments in Google Calendar, and sends email confirmations. Works over text chat and laptop voice.
+
+> **Status:** text chat + voice mode are live. Phone mode (Twilio) is **parked** — the FastAPI webhook code exists in `main.py --serve` and is tested locally, but no Twilio account is connected, so it is not in use. See "Future work" below.
 
 ## Features
 
@@ -8,7 +10,10 @@ Friendly AI receptionist that answers salon questions, books appointments in Goo
 - **Google Calendar booking** — `check_slots` / `book_appointment` with guards for closed days, outside-hours, and double-booking
 - **Auto email confirmation** — Gmail API, sent in Python right after booking (not via LLM tool call, for reliability)
 - **Voice mode** — laptop mic (Groq Whisper) + Edge TTS reply, short 1–2 sentence spoken answers
-- **Phone mode** — FastAPI + Twilio `<Gather>` / `<Say>`, same brain as text/voice
+- **Cancel / reschedule** — `cancel_appointment` / `reschedule_appointment` by phone + date
+- **Returning customers** — `customers.json` remembers name/email/visits by phone; bot greets them back
+- **Booking log** — every book/cancel/reschedule/email appended to `bookings.log` (JSON lines)
+- **Phone mode (parked)** — FastAPI + Twilio `<Gather>` / `<Say>` code present, not connected
 
 ## Tech stack (all free to start)
 
@@ -18,16 +23,16 @@ Friendly AI receptionist that answers salon questions, books appointments in Goo
 | Calendar | Google Calendar API |
 | Email | Gmail API (`gmail.send`) |
 | STT | Groq Whisper `whisper-large-v3-turbo` |
-| TTS | Edge TTS (`en-IN-NeerjaNeural`), Twilio `Polly.Raveena` on phone |
-| Phone | Twilio trial + `ngrok` |
-| Server | FastAPI + Uvicorn |
+| TTS | Edge TTS (`en-IN-NeerjaNeural`) |
+| Phone | Parked (Twilio code in `main.py --serve`, no account connected) |
+| Server | FastAPI + Uvicorn (phone mode only) |
 
 ## Project structure
 
 ```
 ai_receptionist/
 ├── main.py           # app + chat loop + voice loop + phone (FastAPI) server
-├── tools.py          # check_slots, book_appointment, send_confirmation + Google auth
+├── tools.py          # check_slots, book/cancel/reschedule, send_confirmation, customers, log + Google auth
 ├── salon.json        # services, prices, durations, opening hours
 ├── requirements.txt
 ├── test_calendar.py  # direct Calendar test (no LLM)
@@ -69,13 +74,10 @@ python main.py
 # 3. Voice mode (laptop mic + speakers)
 python main.py --voice
 # Press Enter to speak, or type instead (handy for phone/email)
-
-# 4. Phone mode (Twilio)
-python main.py --serve --port 8000
-ngrok http 8000
-# Set Twilio number voice webhook to https://<ngrok-url>/voice (POST)
-# Optional status callback: https://<ngrok-url>/status
 ```
+
+> Phone mode is parked: `python main.py --serve` + `ngrok http 8000` + Twilio webhook
+> still work technically, but no Twilio account is connected right now.
 
 ## Booking flow
 
@@ -85,6 +87,10 @@ ngrok http 8000
 4. `book_appointment(name, phone, service, date, time)` creates Calendar event
 5. Confirmation email auto-sent to the email found in chat history
 6. If no email was given, bot asks for it and sends on the next turn
+
+Cancel / move: customer gives phone (+ date) → `cancel_appointment` deletes the
+event, or `reschedule_appointment` patches it to the new slot (same guards as
+booking). Several matches → bot asks which one.
 
 Guards: closed days (e.g. Sunday) blocked, outside-hours blocked, double-booking blocked, invalid phone/date rejected with a clear message so the LLM can re-ask.
 
@@ -107,3 +113,8 @@ __pycache__/
 credentials.json
 token.json
 ```
+
+## Future work (when needed)
+
+- **Phone mode** — connect a Twilio number to `main.py --serve` (webhook `/voice`, see parked code)
+- **WhatsApp/SMS** confirmations (needs paid API + DLT registration, skipped for now)

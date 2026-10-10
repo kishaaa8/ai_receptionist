@@ -3,8 +3,12 @@ tools.py — Google Calendar tools for the AI Receptionist.
 
 Functions:
     get_calendar_service()  → authenticated Calendar API client
-    check_slots(date, service) → list of free time slots
+    check_slots(date, service, around?) → list of free time slots
     book_appointment(name, phone, service, date, time) → created event details
+    send_confirmation(to_email, name, service, date, time) → Gmail message id
+    cancel_appointment(phone, date?, time?) → cancelled booking details
+    reschedule_appointment(phone, date, new_date, new_time, time?) → moved booking
+    lookup_customer(phone) → saved details for returning customers
 """
 
 import os
@@ -388,6 +392,19 @@ def book_appointment(
         body=event_body,
     ).execute()
 
+    # ── Phase 7: remember + log (must never break the booking) ──────
+    try:
+        remember_customer(phone, name, count_visit=True)
+    except Exception:
+        pass
+    _log("book", {
+        "phone": phone,
+        "customer": name,
+        "service": svc["name"],
+        "start": start_dt.strftime("%Y-%m-%d %H:%M"),
+        "event_id": created_event["id"],
+    })
+
     return {
         "status": "confirmed",
         "event_id": created_event["id"],
@@ -461,9 +478,302 @@ def send_confirmation(
         body={"raw": raw},
     ).execute()
 
+    _log("email", {"to": to_email, "subject": subject})
+
     return {
         "status": "sent",
         "message_id": sent.get("id"),
         "to": to_email,
         "subject": subject,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────
+#  Phase 7: log + returning customers + cancel / reschedule
+# ─────────────────────────────────────────────────────────────────────
+LOG_PATH = os.path.join(BASE_DIR, "bookings.log")
+CUSTOMERS_PATH = os.path.join(BASE_DIR, "customers.json")
+
+
+def _log(action: str, data: dict):
+    """Append one JSON line per booking event. Logging never breaks the caller."""
+    try:
+        entry = {"ts": datetime.now().isoformat(timespec="seconds"), "action": action}
+        entry.update(data)
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _load_customers() -> dict:
+    try:
+        with open(CUSTOMERS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def _save_customers(data: dict):
+    with open(CUSTOMERS_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def remember_customer(
+    phone: str,
+    name: str | None = None,
+    email: str | None = None,
+    count_visit: bool = False,
+) -> dict:
+    """
+    Create/update a returning-customer record keyed by normalized phone.
+    Called after each booking (count_visit=True) and when an email is found.
+    """
+    phone = normalize_phone(phone or "")
+    if len(re.sub(r"\D", "", phone)) < 7:
+        raise ValueError(f"Phone number '{phone}' looks invalid.")
+    customers = _load_customers()
+    rec = customers.get(phone, {"visits": 0})
+    if name:
+        rec["name"] = name.strip()
+    if email:
+        rec["email"] = email.strip()
+    if count_visit:
+        rec["visits"] = rec.get("visits", 0) + 1
+        rec["last_visit"] = datetime.now().strftime("%Y-%m-%d")
+    customers[phone] = rec
+    _save_customers(customers)
+    return {"phone": phone, **rec}
+
+
+def lookup_customer(phone: str) -> dict:
+    """Return saved details for a phone number, or known=False for new customers."""
+    phone = normalize_phone(phone or "")
+    rec = _load_customers().get(phone)
+    if not rec:
+        return {"known": False, "phone": phone}
+    return {"known": True, "phone": phone, **rec}
+
+
+def _parse_event_details(event: dict) -> dict:
+    """Pull our Customer/Phone/Service lines + start time out of a Calendar event."""
+    desc = event.get("description", "") or ""
+
+    def _field(label: str) -> str:
+        m = re.search(rf"^{label}:\s*(.+)$", desc, re.MULTILINE)
+        return m.group(1).strip() if m else ""
+
+    IST = timezone(timedelta(hours=5, minutes=30))
+    start_raw = event.get("start", {}).get("dateTime", "")
+    try:
+        start_dt = _to_naive_ist(start_raw, IST) if start_raw else None
+    except ValueError:
+        start_dt = None
+    return {
+        "event_id": event.get("id", ""),
+        "summary": event.get("summary", ""),
+        "customer": _field("Customer"),
+        "phone": _field("Phone"),
+        "service": _field("Service"),
+        "start": start_dt.strftime("%Y-%m-%d %H:%M") if start_dt else "",
+        "date": start_dt.strftime("%Y-%m-%d") if start_dt else "",
+        "time": start_dt.strftime("%H:%M") if start_dt else "",
+    }
+
+
+def _find_customer_events(phone: str, date: str | None = None) -> list[dict]:
+    """
+    All upcoming AI-booked events for a phone (optionally on one date).
+    Matches the phone digits against the event description we wrote at booking.
+    """
+    phone = normalize_phone(phone or "")
+    digits = re.sub(r"\D", "", phone)
+    if len(digits) < 7 or len(digits) > 15:
+        raise ValueError(f"Phone number '{phone}' looks invalid. Ask for a valid phone number.")
+    if date is not None:
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            raise ValueError(f"Date '{date}' must be YYYY-MM-DD format.")
+
+    service_api = get_calendar_service()
+    if date:
+        day = datetime.strptime(date, "%Y-%m-%d")
+        time_min = day.isoformat() + "+05:30"
+        time_max = (day + timedelta(days=1)).isoformat() + "+05:30"
+    else:
+        now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+        time_min = now.isoformat()
+        time_max = (now + timedelta(days=60)).isoformat()
+
+    events_result = service_api.events().list(
+        calendarId="primary",
+        timeMin=time_min,
+        timeMax=time_max,
+        singleEvents=True,
+        orderBy="startTime",
+    ).execute()
+
+    matches = []
+    for event in events_result.get("items", []):
+        desc_digits = re.sub(r"\D", "", event.get("description", "") or "")
+        if digits not in desc_digits:
+            continue  # someone else's event, or no phone recorded
+        matches.append(_parse_event_details(event))
+    return matches
+
+
+def _pick_one_match(matches: list[dict], action: str) -> dict:
+    """One match → return it. None → error. Many → need_choice for the LLM to ask."""
+    if not matches:
+        raise ValueError("No matching booking found. Check the phone number and date.")
+    if len(matches) > 1:
+        return {
+            "status": "need_choice",
+            "message": f"Multiple bookings found — ask the customer which one to {action}.",
+            "matches": [
+                {"service": m["service"], "date": m["date"], "time": m["time"]}
+                for m in matches
+            ],
+        }
+    return matches[0]
+
+
+# ─────────────────────────────────────────────────────────────────────
+#  Tool 4: cancel_appointment
+# ─────────────────────────────────────────────────────────────────────
+def cancel_appointment(
+    phone: str,
+    date: str | None = None,
+    time: str | None = None,
+) -> dict:
+    """
+    Cancels a booking by deleting its Google Calendar event.
+
+    Args:
+        phone: Customer phone (any format — normalized internally)
+        date:  Optional YYYY-MM-DD to narrow down
+        time:  Optional HH:MM to narrow down further
+
+    Returns:
+        Cancelled booking details, or need_choice with matches.
+    """
+    matches = _find_customer_events(phone, date)
+    if time:
+        matches = [m for m in matches if m["time"] == time]
+    if not matches:
+        where = f" on {date}" if date else " upcoming"
+        raise ValueError(f"No booking found for {phone}{where}. Check the phone number and date.")
+
+    picked = _pick_one_match(matches, "cancel")
+    if isinstance(picked, dict) and picked.get("status") == "need_choice":
+        return picked
+
+    get_calendar_service().events().delete(
+        calendarId="primary", eventId=picked["event_id"]
+    ).execute()
+    _log("cancel", {
+        "phone": normalize_phone(phone or ""),
+        "service": picked["service"],
+        "start": picked["start"],
+    })
+    return {"status": "cancelled", **picked}
+
+
+# ─────────────────────────────────────────────────────────────────────
+#  Tool 5: reschedule_appointment
+# ─────────────────────────────────────────────────────────────────────
+def reschedule_appointment(
+    phone: str,
+    date: str,
+    new_date: str,
+    new_time: str,
+    time: str | None = None,
+) -> dict:
+    """
+    Moves a booking to a new date/time by patching its Calendar event
+    (same event keeps its place — no cancel/rebook gap).
+
+    Args:
+        phone:    Customer phone (any format — normalized internally)
+        date:     Current booking date YYYY-MM-DD
+        new_date: New date YYYY-MM-DD
+        new_time: New start time HH:MM
+        time:     Optional current HH:MM to disambiguate multiple bookings
+
+    Returns:
+        Updated booking details, or need_choice with matches.
+    """
+    matches = _find_customer_events(phone, date)
+    if time:
+        matches = [m for m in matches if m["time"] == time]
+    if not matches:
+        raise ValueError(f"No booking found for {phone} on {date}. Check the details.")
+
+    picked = _pick_one_match(matches, "reschedule")
+    if isinstance(picked, dict) and picked.get("status") == "need_choice":
+        return picked
+
+    if picked["date"] == new_date and picked["time"] == new_time:
+        return {"status": "unchanged", "message": "Already at that date and time.", **picked}
+
+    svc = SERVICE_LOOKUP.get((picked["service"] or "").lower())
+    if not svc:
+        raise ValueError(
+            f"Original service '{picked['service']}' is no longer offered. "
+            f"Please cancel and book afresh."
+        )
+
+    # ── Same guards as booking (closed / hours / double-book) ───────
+    hours = _get_hours_for_date(new_date)
+    if hours is None:
+        day_name = datetime.strptime(new_date, "%Y-%m-%d").strftime("%A")
+        raise ValueError(f"Salon is closed on {day_name} ({new_date}). Suggest the next open day.")
+    try:
+        new_start = datetime.strptime(f"{new_date} {new_time}", "%Y-%m-%d %H:%M")
+    except ValueError:
+        raise ValueError(f"New date/time '{new_date} {new_time}' must be YYYY-MM-DD HH:MM format.")
+    new_end = new_start + timedelta(minutes=svc["duration_minutes"])
+    open_dt = datetime.strptime(f"{new_date} {hours['open']}", "%Y-%m-%d %H:%M")
+    close_dt = datetime.strptime(f"{new_date} {hours['close']}", "%Y-%m-%d %H:%M")
+    if new_start < open_dt or new_end > close_dt:
+        raise ValueError(
+            f"Requested time {new_time} is outside working hours "
+            f"({hours['open']}-{hours['close']}) on {new_date}."
+        )
+    free = check_slots(new_date, svc["name"])
+    if not any(s["start"] == new_time for s in free):
+        raise ValueError(
+            f"Slot {new_time} on {new_date} is not available for '{svc['name']}'. "
+            f"Please pick another time."
+        )
+
+    # ── Move the event ──────────────────────────────────────────────
+    service_api = get_calendar_service()
+    patched = service_api.events().patch(
+        calendarId="primary",
+        eventId=picked["event_id"],
+        body={
+            "start": {"dateTime": new_start.isoformat(), "timeZone": "Asia/Kolkata"},
+            "end": {"dateTime": new_end.isoformat(), "timeZone": "Asia/Kolkata"},
+        },
+    ).execute()
+
+    _log("reschedule", {
+        "phone": normalize_phone(phone or ""),
+        "service": svc["name"],
+        "old_start": picked["start"],
+        "new_start": new_start.strftime("%Y-%m-%d %H:%M"),
+    })
+    return {
+        "status": "rescheduled",
+        "event_id": patched["id"],
+        "event_link": patched.get("htmlLink"),
+        "service": svc["name"],
+        "customer": picked["customer"],
+        "phone": picked["phone"],
+        "old_start": picked["start"],
+        "start": new_start.strftime("%Y-%m-%d %H:%M"),
+        "end": new_end.strftime("%Y-%m-%d %H:%M"),
     }
